@@ -1,0 +1,49 @@
+version: 0.2
+run-as: root
+
+phases:
+  install: # Initially comment complete install phase, once EKS Cluster is ready then uncomment this.
+    commands:
+      - echo Installing kubectl...
+      - curl -o kubectl https://amazon-eks.s3.us-west-2.amazonaws.com/1.18.9/2020-11-02/bin/linux/amd64/kubectl
+      - chmod +x ./kubectl
+      - mkdir -p $HOME/bin && cp ./kubectl $HOME/bin/kubectl
+      - export PATH=$PATH:$HOME/bin
+      - echo 'Check kubectl version'
+      - kubectl version --short --client
+
+  pre_build:
+    commands:
+      - echo setting EKS cluster context
+      # Initially comment till "kubectl get svc", once EKS Cluster is ready then uncomment this.
+      - aws eks --region us-east-1 update-kubeconfig --name cicd-cluster
+      - echo check config
+      - kubectl config view --minify
+      - echo Checking kubectl access
+      - kubectl get svc
+      # Retrieve AWS Account ID
+      - 'AWS_ACCOUNT_ID=$(aws ssm get-parameters --names /myapp/aws-account-id --with-decryption --query "Parameters[0].Value" --output text)'
+      # logging into docker to download base images for project, with AWS User it has a rate limit set.
+      # alternative download base images from aws ECR.
+      - 'DOCKER_USERNAME=$(aws ssm get-parameters --names /myapp/docker-credentials/username --with-decryption --query "Parameters[0].Value" --output text)'
+      - 'DOCKER_PASSWORD=$(aws ssm get-parameters --names /myapp/docker-credentials/password --with-decryption --query "Parameters[0].Value" --output text)'
+      - echo "Logging in to Docker Hub..."
+      - echo $DOCKER_PASSWORD | docker login --username $DOCKER_USERNAME --password-stdin docker.io
+      - echo "Logging in to Amazon ECR to store images"
+      - aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com
+
+  build:
+    commands:
+      - echo Building the Docker image...
+      - docker build -t simple-python-webapp .
+
+  post_build:
+    commands:
+      - echo "Tagging Docker image..."
+      - docker tag simple-python-webapp:latest $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/simple-python-webapp:latest
+      - echo "Pushing Docker image to Amazon ECR..."
+      - docker push $AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/simple-python-webapp:latest
+      # Initially comment below steps apply deployment and rollout deployment; once you have your docker image pushed to ECR and EKS Cluster is ready uncomment and trigger build for new changes to reflect.
+      - kubectl apply -f kubernetes/deployment.yaml
+      - kubectl rollout restart -f kubernetes/deployment.yaml
+      # service should be created manually after creating cluster one time activity; also Ingress should be created manually
